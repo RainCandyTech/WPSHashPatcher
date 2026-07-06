@@ -50,16 +50,29 @@ fun patchExecutableFile(data: ByteBuffer, architecture: Architecture) {
         )
     }
 
-    // 检查是否已经修补，以替换的字节及其末尾的0xFF作为标识
-    check(findPattern(data, replacement, maxMatches = 1).isEmpty()) { "Patch already applied." }
-    // 以特征码模糊查找目标位置，最多查询2个结果以检测特征码的唯一性
+    // 以特征码模糊查找目标位置（仅锚点定位），最多查询2个结果以确保唯一性
     val anchorMatches = findPattern(data, anchorPattern, anchorMask, maxMatches = 2)
     check(anchorMatches.size == 1) { "Anchor pattern is not unique or not found." }
-    // 从目标位置向前寻找函数起始位置
-    data.position(anchorMatches[0])
+    val anchorPos = anchorMatches[0]
+
+    // 从锚点向前逆向搜索原始函数起始字节（限制在 1024 字节内）
+    data.position(anchorPos)
     val replacementMatches = findPattern(data, replacementPattern, reverse = true, maxMatches = 1)
     check(replacementMatches.isNotEmpty()) { "Function start not found." }
-    // 替换
-    data.position(replacementMatches[0])
+    val funcStart = replacementMatches[0]
+
+    // 检查搜索到的位置是否在锚点前 1024 字节内
+    check(anchorPos - funcStart <= 1024) { "Function start too far from anchor (exceed 1024 bytes)." }
+
+    // 检查是否已打补丁（比较当前位置是否为 replacement 内容）
+    data.position(funcStart)
+    val alreadyPatched = (0 until replacement.size).all { data.get() == replacement[it] }
+    if (alreadyPatched) {
+        // 已打补丁，视为成功
+        return
+    }
+
+    // 执行替换
+    data.position(funcStart)
     data.put(replacement)
 }
