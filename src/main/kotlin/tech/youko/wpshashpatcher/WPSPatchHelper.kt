@@ -75,7 +75,9 @@ fun patchExecutableFile(data: ByteBuffer, architecture: Architecture) {
 
 private fun tryPatchExecutableFile(data: ByteBuffer, spec: PatchSpec): Boolean {
     val anchorMatches = findPattern(data, spec.anchor, index = 0, maxMatches = 2)
-    if (anchorMatches.size != 1) return false
+    if (anchorMatches.size != 1) {
+        return false
+    }
     val anchorPos = anchorMatches.single()
 
     val prologuePos = findPattern(data, spec.prologue, index = anchorPos, reverse = true, maxMatches = 1).firstOrNull()
