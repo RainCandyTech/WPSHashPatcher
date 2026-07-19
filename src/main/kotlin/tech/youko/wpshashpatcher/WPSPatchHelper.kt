@@ -7,72 +7,115 @@ import java.nio.ByteOrder
 import java.nio.channels.FileChannel
 
 enum class Architecture {
-    I386, AMD64
+    I386, AMD64, ARM64
 }
+
+private data class PatchSpec(
+    val anchor: IntArray,
+    val prologue: IntArray,
+    val replacement: ByteArray
+)
 
 fun patchExecutableFile(file: File) {
     RandomAccessFile(file, "rw").use {
         val data = it.channel.map(FileChannel.MapMode.READ_WRITE, 0, it.channel.size())
-        // 设置处理方式为小端
         data.order(ByteOrder.LITTLE_ENDIAN)
-        // 判断DOS头
         check(data.short == 0x5A4D.toShort()) { "Invalid DOS header." }
-        // 移动到PE头
         data.position(0x3C)
-        data.position(data.int)
-        // 判断PE头
+        val peOffset = data.int
+        data.position(peOffset)
         check(data.int == 0x4550) { "Invalid PE header." }
-        // 获取可执行文件架构
         val architecture = when (data.short) {
             0x014C.toShort() -> Architecture.I386
             0x8664.toShort() -> Architecture.AMD64
+            0xAA64.toShort() -> Architecture.ARM64
             else -> error("Unsupported architecture.")
         }
-        // 修补
-        patchExecutableFile(data, architecture)
+        val sectionCount = data.short.toInt() and 0xFFFF
+        val optionalHeaderSize = data.getShort(peOffset + 20).toInt() and 0xFFFF
+        val sectionTableOffset = peOffset + 24 + optionalHeaderSize
+        val textSection = (0 until sectionCount).firstNotNullOfOrNull { index ->
+            val sectionOffset = sectionTableOffset + index * 40
+            val name = ByteArray(8).also { name ->
+                val sectionHeader = data.duplicate().apply { position(sectionOffset) }
+                sectionHeader.get(name)
+            }.takeWhile { it != 0.toByte() }.toByteArray().toString(Charsets.US_ASCII)
+            if (name == ".text") {
+                val size = data.getInt(sectionOffset + 16)
+                val offset = data.getInt(sectionOffset + 20)
+                offset to size
+            } else {
+                null
+            }
+        } ?: error(".text section not found.")
+
+        val (textOffset, textSize) = textSection
+        check(textOffset >= 0 && textSize > 0 && textOffset.toLong() + textSize <= data.limit()) { "Invalid .text section range." }
+        val text = data.duplicate().apply {
+            position(textOffset)
+            limit(textOffset + textSize)
+        }.slice().order(ByteOrder.LITTLE_ENDIAN)
+        patchExecutableFile(text, architecture)
     }
 }
 
 fun patchExecutableFile(data: ByteBuffer, architecture: Architecture) {
-    val (anchorPattern, anchorMask, replacementPattern, replacement) = when (architecture) {
-        Architecture.I386 -> arrayOf(
-            byteArrayOf(0x00, 0x02, 0x00, 0x00, 0x73, -0x01, 0x56),
-            byteArrayOf(0x00, 0x00, 0x00, 0x00, 0x00, -0x01, 0x00),
-            byteArrayOf(0x53, -0x75, -0x24),
-            byteArrayOf(0x31, -0x40, -0x3D, -0x01)
-        )
+    val candidates = when (architecture) {
+        Architecture.I386 -> listOf(Architecture.I386)
+        Architecture.AMD64 -> listOf(Architecture.AMD64, Architecture.ARM64)
+        Architecture.ARM64 -> listOf(Architecture.ARM64)
+    }
+    for (candidate in candidates) {
+        if (tryPatchExecutableFile(data, patchSpec(candidate))) {
+            return
+        }
+    }
+    error("KRSAVerifyFile anchor is not unique or not found.")
+}
 
-        Architecture.AMD64 -> arrayOf(
-            byteArrayOf(0x63, -0x01, -0x01, -0x01, -0x01, 0x00, 0x02, 0x00, 0x00, 0x73),
-            byteArrayOf(0x00, -0x01, -0x01, -0x01, -0x01, 0x00, 0x00, 0x00, 0x00, 0x00),
-            byteArrayOf(0x48, -0x77, 0x5C, 0x24, 0x10),
-            byteArrayOf(0x48, 0x31, -0x40, -0x3D, -0x01)
-        )
+private fun tryPatchExecutableFile(data: ByteBuffer, spec: PatchSpec): Boolean {
+    val anchorMatches = findPattern(data, spec.anchor, index = 0, maxMatches = 2)
+    if (anchorMatches.size != 1) return false
+    val anchorPos = anchorMatches.single()
+
+    val prologuePos = findPattern(data, spec.prologue, index = anchorPos, reverse = true, maxMatches = 1).firstOrNull()
+    val patchedPos = findPattern(data, spec.replacement.toPattern(), index = anchorPos, reverse = true, maxMatches = 1).firstOrNull()
+    val functionStart = listOfNotNull(prologuePos, patchedPos).maxOrNull() ?: error("KRSAVerifyFile function start not found.")
+
+    if (functionStart == patchedPos) {
+        return true
     }
 
-    // 以特征码模糊查找目标位置（仅锚点定位），最多查询2个结果以确保唯一性
-    val anchorMatches = findPattern(data, anchorPattern, anchorMask, maxMatches = 2)
-    check(anchorMatches.size == 1) { "Anchor pattern is not unique or not found." }
-    val anchorPos = anchorMatches[0]
+    data.position(functionStart)
+    data.put(spec.replacement)
+    return true
+}
 
-    // 从锚点向前逆向搜索原始函数起始字节（限制在 1024 字节内）
-    data.position(anchorPos)
-    val replacementMatches = findPattern(data, replacementPattern, reverse = true, maxMatches = 1)
-    check(replacementMatches.isNotEmpty()) { "Function start not found." }
-    val funcStart = replacementMatches[0]
+private fun patchSpec(architecture: Architecture): PatchSpec = when (architecture) {
+    Architecture.I386 -> PatchSpec(
+        anchor = intArrayOf(
+            0xC7, 0x06, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xC7, 0x46, 0x04, 0xFFFF, 0xFFFF, 0xFFFF,
+            0xFFFF, 0xEB, 0x02, 0x33, 0xF6, 0x83, 0x7F, 0x14, 0x10, 0xC6, 0x45, 0xFC, 0x00
+        ),
+        prologue = intArrayOf(0x55, 0x8B, 0xEC),
+        replacement = bytesOf(0xB0, 0x01, 0xC3)
+    )
 
-    // 检查搜索到的位置是否在锚点前 1024 字节内
-    check(anchorPos - funcStart <= 1024) { "Function start too far from anchor (exceed 1024 bytes)." }
+    Architecture.AMD64 -> PatchSpec(
+        anchor = intArrayOf(
+            0x4C, 0x8D, 0x3D, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x4C, 0x89, 0x3F, 0x4C, 0x8D,
+            0x25, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0x4C, 0x89, 0x67, 0x08
+        ),
+        prologue = intArrayOf(0x40, 0x53, 0x56),
+        replacement = bytesOf(0xB0, 0x01, 0xC3)
+    )
 
-    // 检查是否已打补丁（比较当前位置是否为 replacement 内容）
-    data.position(funcStart)
-    val alreadyPatched = (0 until replacement.size).all { data.get() == replacement[it] }
-    if (alreadyPatched) {
-        // 已打补丁，视为成功
-        return
-    }
-
-    // 执行替换
-    data.position(funcStart)
-    data.put(replacement)
+    Architecture.ARM64 -> PatchSpec(
+        anchor = intArrayOf(
+            0x00, 0xD0, 0xFFFF, 0xFFFF, 0xFFFF, 0x91, 0xFFFF, 0xFFFF, 0x00, 0xD0, 0xFFFF,
+            0xFFFF, 0xFFFF, 0x91, 0xFFFF, 0x5A, 0x00, 0xA9
+        ),
+        prologue = intArrayOf(0xFD, 0xFFFF, 0xFFFF, 0xA9),
+        replacement = bytesOf(0x20, 0x00, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6)
+    )
 }

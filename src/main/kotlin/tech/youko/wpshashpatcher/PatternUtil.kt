@@ -4,8 +4,7 @@ import java.nio.ByteBuffer
 
 fun findPattern(
     data: ByteBuffer,
-    pattern: ByteArray,
-    mask: ByteArray? = null,
+    pattern: IntArray,
     index: Int = data.position(),
     reverse: Boolean = false,
     maxMatches: Int = Int.MAX_VALUE
@@ -15,10 +14,14 @@ fun findPattern(
     val range = if (reverse) start downTo 0 else start..data.limit() - pattern.size
 
     for (i in range) {
-        if (pattern.indices.all { j -> mask != null && mask[j] == 0xFF.toByte() || pattern[j] == data[i + j] }) {
+        if (pattern.indices.all { j -> pattern[j] > 0xFF || pattern[j].toByte() == data[i + j] }) {
             matches.add(i)
             if (matches.size >= maxMatches) break
         }
     }
     return matches
 }
+
+fun bytesOf(vararg values: Int): ByteArray = values.map(Int::toByte).toByteArray()
+
+fun ByteArray.toPattern(): IntArray = map { it.toUByte().toInt() }.toIntArray()
