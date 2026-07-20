@@ -3,8 +3,17 @@ package tech.youko.wpshashpatcher
 import java.nio.ByteBuffer
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
+import kotlin.test.assertEquals
 
 class WPSPatchHelperTest {
+    @Test
+    fun `supports bit masks and full byte wildcards`() {
+        val data = ByteBuffer.wrap(byteArrayOf(0xA5.toByte(), 0xB5.toByte(), 0xA6.toByte()))
+
+        assertEquals(listOf(0, 1), findPattern(data, intArrayOf(0x05), intArrayOf(0xF0)))
+        assertEquals(listOf(0, 1, 2), findPattern(data, intArrayOf(0), intArrayOf(0xFF)))
+    }
+
     @Test
     fun `patches x86 KRSAVerifyFile and remains idempotent`() {
         verifyPatch(
@@ -30,7 +39,7 @@ class WPSPatchHelperTest {
         verifyPatch(
             Architecture.ARM64,
             "FD 7B BF A9",
-            "00 D0 11 22 33 91 44 55 00 D0 66 77 88 91 99 5A 00 A9",
+            "49 A3 02 A9 68 1C 00 D0 08 A1 1F 91 40 03 01 91 48 53 00 F9",
             "20 00 80 52 C0 03 5F D6"
         )
     }
@@ -40,7 +49,7 @@ class WPSPatchHelperTest {
         verifyPatch(
             Architecture.AMD64,
             "FD 7B BF A9",
-            "00 D0 11 22 33 91 44 55 00 D0 66 77 88 91 99 5A 00 A9",
+            "49 A3 02 A9 68 1C 00 D0 08 E1 04 91 40 03 01 91 48 53 00 F9",
             "20 00 80 52 C0 03 5F D6"
         )
     }
